@@ -21,6 +21,7 @@ from minisweagent.agents.default import DefaultAgent
 from minisweagent.config import builtin_config_dir, get_config_from_spec
 from minisweagent.environments import get_environment
 from minisweagent.models import get_model
+from minisweagent.run.benchmarks.nc_constants import MAP_REPO_TO_CONFIG
 from minisweagent.run.benchmarks.utils.batch_progress import RunBatchProgressManager
 from minisweagent.utils.log import add_file_handler, logger
 from minisweagent.utils.serialize import UNSET, recursive_merge
@@ -50,17 +51,14 @@ Examples:
 
 DEFAULT_CONFIG_FILE = builtin_config_dir / "benchmarks" / "swebench.yaml"
 
+app = typer.Typer(rich_markup_mode="rich", add_completion=False)
+
 DATASET_MAPPING = {
-    "full": "princeton-nlp/SWE-Bench",
-    "verified": "princeton-nlp/SWE-Bench_Verified",
-    "lite": "princeton-nlp/SWE-Bench_Lite",
-    "multimodal": "princeton-nlp/SWE-Bench_Multimodal",
-    "multilingual": "swe-bench/SWE-Bench_Multilingual",
-    "smith": "SWE-bench/SWE-smith",
-    "_test": "klieret/swe-bench-dummy-test-dataset",
+    "full": "NoCode-bench/NoCode-bench_Full",
+    "verified": "NoCode-bench/NoCode-bench_Verified",
 }
 
-app = typer.Typer(rich_markup_mode="rich", add_completion=False)
+
 _OUTPUT_FILE_LOCK = threading.Lock()
 
 
@@ -78,21 +76,21 @@ class ProgressTrackingAgent(DefaultAgent):
         return super().step()
 
 
-def get_swebench_docker_image_name(instance: dict) -> str:
+def get_ncbench_docker_image_name(instance: dict) -> str:
     """Get the image name for a SWEBench instance."""
     image_name = instance.get("image_name", None)
     if image_name is None:
-        # Docker doesn't allow double underscore, so we replace them with a magic token
         iid = instance["instance_id"]
-        id_docker_compatible = iid.replace("__", "_1776_")
-        image_name = f"docker.1ms.run/swebench/sweb.eval.x86_64.{id_docker_compatible}:latest".lower()
+        image_name = f"ncbench_{iid}:latest".lower()
     return image_name
 
-
 def get_sb_environment(config: dict, instance: dict) -> Environment:
-    env_config = config.setdefault("environment", {})
+    env_config = config.setdefault("environment", {}).copy()
+    if "cwd" in env_config:
+        env_config["cwd"] = Template(env_config["cwd"]).render(**instance)
+        logger.info(f"Set working dir to: {env_config['cwd']}")
     env_config["environment_class"] = env_config.get("environment_class", "docker")
-    image_name = get_swebench_docker_image_name(instance)
+    image_name = get_ncbench_docker_image_name(instance)
     if env_config["environment_class"] in ["docker", "swerex_modal"]:
         env_config["image"] = image_name
     elif env_config["environment_class"] == "singularity":
@@ -162,6 +160,8 @@ def process_instance(
     (instance_dir / f"{instance_id}.traj.json").unlink(missing_ok=True)
     model = get_model(config=config.get("model", {}))
     task = instance["problem_statement"]
+    repo_name = instance["repo_name"]
+    env_name = instance["env_name"]
 
     progress_manager.on_instance_start(instance_id)
     progress_manager.update_instance_status(instance_id, "Pulling/starting docker")
@@ -178,7 +178,6 @@ def process_instance(
         exit_status = None
         result = None
         extra_info = {}
-
         env = None
         try:
             env = get_sb_environment(config, instance)
@@ -189,7 +188,7 @@ def process_instance(
                 instance_id=instance_id,
                 **config.get("agent", {}),
             )
-            info = agent.run(task)
+            info = agent.run(task, repo_name=repo_name, env_name=env_name)
             exit_status = info.get("exit_status")
             result = info.get("submission")
         except Exception as e:
@@ -255,7 +254,7 @@ def filter_instances(
 # fmt: off
 @app.command(help=_HELP_TEXT)
 def main(
-    subset: str = typer.Option("lite", "--subset", help="SWEBench subset to use or path to a dataset", rich_help_panel="Data selection"),
+    subset: str = typer.Option("verified", "--subset", help="SWEBench subset to use or path to a dataset", rich_help_panel="Data selection"),
     split: str = typer.Option("dev", "--split", help="Dataset split", rich_help_panel="Data selection"),
     slice_spec: str = typer.Option("", "--slice", help="Slice specification (e.g., '0:5' for first 5 instances)", rich_help_panel="Data selection"),
     filter_spec: str = typer.Option("", "--filter", help="Filter instance IDs by regex", rich_help_panel="Data selection"),
@@ -281,6 +280,12 @@ def main(
     logger.info(f"Loading dataset {dataset_path}, split {split}...")
     instances = list(load_dataset(dataset_path, split=split))
 
+    for inst in instances:
+        if "repo_name" not in inst:
+            inst["repo_name"] = inst["repo"].split("/")[-1]
+        if "env_name" not in inst:
+            inst["env_name"] = MAP_REPO_TO_CONFIG[inst["repo"]][inst["version"]]
+
     instances = filter_instances(instances, filter_spec=filter_spec, slice_spec=slice_spec, shuffle=shuffle)
     if not redo_existing and (output_path / "preds.json").exists():
         preds = json.loads((output_path / "preds.json").read_text())
@@ -296,10 +301,12 @@ def main(
 
     logger.info(f"Building agent config from specs: {config_spec}")
     configs = [get_config_from_spec(spec) for spec in config_spec]
-    configs.append({
-        "environment": {"environment_class": environment_class or UNSET},
-        "model": {"model_name": model or UNSET, "model_class": model_class or UNSET},
-    })
+    configs.append(
+        {
+            "environment": {"environment_class": environment_class or UNSET},
+            "model": {"model_name": model or UNSET, "model_class": model_class or UNSET},
+        }
+    )
     config = recursive_merge(*configs)
 
     progress_manager = RunBatchProgressManager(len(instances), output_path / f"exit_statuses_{time.time()}.yaml")
@@ -325,9 +332,7 @@ def main(
                     config,
                     progress_manager,
                     max_retries,
-                ): instance[
-                    "instance_id"
-                ]
+                ): instance["instance_id"]
                 for instance in instances
             }
             try:

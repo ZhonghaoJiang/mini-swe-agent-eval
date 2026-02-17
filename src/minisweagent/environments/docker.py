@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from minisweagent.exceptions import Submitted
+from minisweagent.exceptions import Submitted, TimeoutError
 from minisweagent.utils.serialize import recursive_merge
 
 
@@ -31,7 +31,7 @@ class DockerEnvironmentConfig(BaseModel):
     """Additional arguments to pass to the docker/container executable.
     Default is ["--rm"], which removes the container after it exits.
     """
-    container_timeout: str = "2h"
+    container_timeout: str = "3h"
     """Max duration to keep container running. Uses the same format as the sleep command."""
     pull_timeout: int = 120
     """Timeout in seconds for pulling images."""
@@ -123,6 +123,15 @@ class DockerEnvironment:
                 stderr=subprocess.STDOUT,
             )
             output = {"output": result.stdout, "returncode": result.returncode, "exception_info": ""}
+            if result.returncode != 0 and self._container_stopped(result.stdout):
+                self.cleanup()
+                raise TimeoutError(
+                    {
+                        "role": "exit",
+                        "content": "Container stopped (timeout)",
+                        "extra": {"exit_status": "TimeoutError", "submission": ""},
+                    }
+                )
         except Exception as e:
             raw_output = getattr(e, "output", None)
             raw_output = (
@@ -159,3 +168,8 @@ class DockerEnvironment:
     def __del__(self):
         """Cleanup container when object is destroyed."""
         self.cleanup()
+
+    @staticmethod
+    def _container_stopped(output: str) -> bool:
+        message = (output or "").lower()
+        return "no such container" in message or "is not running" in message
