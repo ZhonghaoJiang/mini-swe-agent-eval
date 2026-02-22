@@ -59,6 +59,12 @@ DATASET_MAPPING = {
     "smith": "SWE-bench/SWE-smith",
     "_test": "klieret/swe-bench-dummy-test-dataset",
 }
+LOCAL_DATASET_BUILDERS = {
+    ".json": "json",
+    ".jsonl": "json",
+    ".csv": "csv",
+    ".parquet": "parquet",
+}
 
 app = typer.Typer(rich_markup_mode="rich", add_completion=False)
 _OUTPUT_FILE_LOCK = threading.Lock()
@@ -252,6 +258,27 @@ def filter_instances(
     return instances
 
 
+def load_instances(subset: str, split: str) -> list[dict]:
+    """Load SWEBench instances from HF dataset names or local data files."""
+    from datasets import load_dataset
+
+    dataset_path = DATASET_MAPPING.get(subset, subset)
+    dataset_file = Path(dataset_path)
+    if dataset_file.is_file() and dataset_file.suffix.lower() in LOCAL_DATASET_BUILDERS:
+        builder = LOCAL_DATASET_BUILDERS[dataset_file.suffix.lower()]
+        if split != "train":
+            logger.warning(
+                "Local data file '%s' only supports split='train'; overriding split '%s' -> 'train'.",
+                dataset_file,
+                split,
+            )
+            split = "train"
+        logger.info("Loading local dataset file %s with builder %s, split %s...", dataset_file, builder, split)
+        return list(load_dataset(builder, data_files=str(dataset_file), split=split))
+    logger.info(f"Loading dataset {dataset_path}, split {split}...")
+    return list(load_dataset(dataset_path, split=split))
+
+
 # fmt: off
 @app.command(help=_HELP_TEXT)
 def main(
@@ -275,11 +302,7 @@ def main(
     logger.info(f"Results will be saved to {output_path}")
     add_file_handler(output_path / "minisweagent.log")
 
-    from datasets import load_dataset
-
-    dataset_path = DATASET_MAPPING.get(subset, subset)
-    logger.info(f"Loading dataset {dataset_path}, split {split}...")
-    instances = list(load_dataset(dataset_path, split=split))
+    instances = load_instances(subset, split)
 
     instances = filter_instances(instances, filter_spec=filter_spec, slice_spec=slice_spec, shuffle=shuffle)
     if not redo_existing and (output_path / "preds.json").exists():
