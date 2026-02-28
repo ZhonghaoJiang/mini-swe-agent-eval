@@ -4,6 +4,7 @@
 # Read this first: https://mini-swe-agent.com/latest/usage/swebench/  (usage docs)
 
 import concurrent.futures
+import inspect
 import json
 import random
 import re
@@ -56,7 +57,7 @@ DATASET_MAPPING = {
     "lite": "princeton-nlp/SWE-Bench_Lite",
     "multimodal": "princeton-nlp/SWE-Bench_Multimodal",
     "multilingual": "swe-bench/SWE-Bench_Multilingual",
-    "smith": "SWE-bench/SWE-smith",
+    "smith": "SWE-bench/SWE-smith-py",
     "_test": "klieret/swe-bench-dummy-test-dataset",
 }
 LOCAL_DATASET_BUILDERS = {
@@ -92,6 +93,13 @@ def get_swebench_docker_image_name(instance: dict) -> str:
         iid = instance["instance_id"]
         id_docker_compatible = iid.replace("__", "_1776_")
         image_name = f"docker.1ms.run/swebench/sweb.eval.x86_64.{id_docker_compatible}:latest".lower()
+    elif image_name.startswith("swebench/"):
+        # SWE-smith samples often provide a Docker Hub image path without registry host.
+        # Use the configured mirror registry for these images.
+        image_name = f"docker.1ms.run/{image_name}"
+    elif image_name.startswith("docker.io/swebench/"):
+        # Normalize docker.io host to the same mirror registry.
+        image_name = "docker.1ms.run/" + image_name.removeprefix("docker.io/")
     return image_name
 
 
@@ -106,7 +114,7 @@ def get_sb_environment(config: dict, instance: dict) -> Environment:
     env = get_environment(env_config)
     if startup_command := config.get("run", {}).get("env_startup_command"):
         startup_command = Template(startup_command, undefined=StrictUndefined).render(**instance)
-        out = env.execute(startup_command)
+        out = env.execute({"command": startup_command})
         if out["returncode"] != 0:
             raise RuntimeError(f"Error executing startup command: {out}")
     return env
