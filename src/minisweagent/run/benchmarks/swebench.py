@@ -93,11 +93,11 @@ def get_swebench_docker_image_name(instance: dict) -> str:
         iid = instance["instance_id"]
         id_docker_compatible = iid.replace("__", "_1776_")
         image_name = f"docker.1ms.run/swebench/sweb.eval.x86_64.{id_docker_compatible}:latest".lower()
-    elif image_name.startswith("swebench/"):
-        # SWE-smith samples often provide a Docker Hub image path without registry host.
+    elif image_name.startswith(("swebench/", "swerebench/")):
+        # Datasets often provide a Docker Hub image path without registry host.
         # Use the configured mirror registry for these images.
         image_name = f"docker.1ms.run/{image_name}"
-    elif image_name.startswith("docker.io/swebench/"):
+    elif image_name.startswith(("docker.io/swebench/", "docker.io/swerebench/")):
         # Normalize docker.io host to the same mirror registry.
         image_name = "docker.1ms.run/" + image_name.removeprefix("docker.io/")
     return image_name
