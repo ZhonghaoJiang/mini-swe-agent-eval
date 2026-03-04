@@ -273,7 +273,6 @@ def load_instances(subset: str, split: str) -> list[dict]:
     dataset_path = DATASET_MAPPING.get(subset, subset)
     dataset_file = Path(dataset_path)
     if dataset_file.is_file() and dataset_file.suffix.lower() in LOCAL_DATASET_BUILDERS:
-        builder = LOCAL_DATASET_BUILDERS[dataset_file.suffix.lower()]
         if split != "train":
             logger.warning(
                 "Local data file '%s' only supports split='train'; overriding split '%s' -> 'train'.",
@@ -281,6 +280,36 @@ def load_instances(subset: str, split: str) -> list[dict]:
                 split,
             )
             split = "train"
+        if dataset_file.suffix.lower() in {".json", ".jsonl"}:
+            logger.info("Loading local JSON dataset file %s...", dataset_file)
+            if dataset_file.suffix.lower() == ".jsonl":
+                raw_text = dataset_file.read_text()
+                decoder = json.JSONDecoder()
+                instances: list[dict] = []
+                idx = 0
+                text_len = len(raw_text)
+                while idx < text_len:
+                    while idx < text_len and raw_text[idx].isspace():
+                        idx += 1
+                    if idx >= text_len:
+                        break
+                    obj, idx = decoder.raw_decode(raw_text, idx)
+                    if not isinstance(obj, dict):
+                        raise ValueError(
+                            f"JSONL dataset '{dataset_file}' must contain JSON object records, got {type(obj).__name__}."
+                        )
+                    instances.append(obj)
+                return instances
+            json_data = json.loads(dataset_file.read_text())
+            if isinstance(json_data, list):
+                return json_data
+            if isinstance(json_data, dict):
+                # Keep compatibility with {"train": [...]} style local JSON files.
+                if split in json_data and isinstance(json_data[split], list):
+                    return json_data[split]
+                raise ValueError(f"JSON dataset '{dataset_file}' must contain list data for split '{split}'.")
+            raise ValueError(f"Unsupported JSON dataset format in '{dataset_file}'.")
+        builder = LOCAL_DATASET_BUILDERS[dataset_file.suffix.lower()]
         logger.info("Loading local dataset file %s with builder %s, split %s...", dataset_file, builder, split)
         return list(load_dataset(builder, data_files=str(dataset_file), split=split))
     logger.info(f"Loading dataset {dataset_path}, split {split}...")
